@@ -1,0 +1,153 @@
+runtime:
+  # Set to one of: auto, small, balanced, t4_colab, large.
+  # You can also override at runtime with:
+  #   OMNI_PROFILE=small|balanced|t4_colab|large
+  active_profile: t4_colab
+
+  auto_profile:
+    cpu_profile: small
+    fallback_profile: balanced
+    gpu_vram_gb_rules:
+      - max_vram_gb: 4.5
+        profile: small
+      - max_vram_gb: 10.0
+        profile: balanced
+      - max_vram_gb: 16.5
+        profile: t4_colab
+      - max_vram_gb: 999.0
+        profile: large
+
+profiles:
+  # Base values shared by all profiles.
+  base:
+    model:
+      vocab_size: 50257
+      reason_threshold: 0.85
+      novelty_threshold: 0.10
+      novelty_sketch_dim: 64
+      use_morton: true
+      morton_proj_dim: 8
+      morton_bits: 6
+    train:
+      seq_len: 64
+      batch_size: 1
+      grad_accum_steps: 16
+      num_workers: 0
+      prefetch_factor: 2
+      persistent_workers: false
+      pin_memory: true
+      lr: 0.0002
+      weight_decay: 0.01
+      grad_clip: 1.0
+      log_every: 25
+      ckpt_every: 200
+      max_steps: 0
+    data:
+      dataset_name: daily_dialog
+      dataset_config: ""
+      dataset_split: train
+      streaming: false
+      text_field: dialog
+      max_examples: 0
+      max_chars_per_example: 0
+      english_only: true
+      min_english_ratio: 0.70
+      chat_messages_field: messages
+      chat_role_field: role
+      chat_content_field: content
+      chat_role_fallback_fields: [from, speaker]
+      chat_content_fallback_fields: [value, text, utterance]
+      prompt_field: prompt
+      response_field: response
+      prompt_fallback_fields: [instruction, question, query, input]
+      response_fallback_fields: [response, output, answer, completion]
+      max_turns_per_example: 0
+    inference:
+      max_new_tokens: 64
+      max_context_tokens: 64
+      do_sample: true
+      temperature: 0.9
+      top_k: 50
+      top_p: 0.95
+      repetition_penalty: 1.1
+
+  # 4GB VRAM profile (GTX 1650 class).
+  small:
+    model:
+      dim: 192
+      heads: 4
+      experts: 4
+      max_reason_steps: 2
+      novelty_buf_size: 512
+    train:
+      seq_len: 64
+      batch_size: 1
+      grad_accum_steps: 16
+
+  # 6-10GB VRAM profile.
+  balanced:
+    model:
+      dim: 256
+      heads: 4
+      experts: 6
+      max_reason_steps: 3
+      novelty_buf_size: 1024
+    train:
+      seq_len: 96
+      batch_size: 1
+      grad_accum_steps: 16
+
+  # 12GB+ VRAM profile.
+  t4_colab:
+    model:
+      dim: 320
+      heads: 8
+      experts: 8
+      max_reason_steps: 3
+      novelty_buf_size: 2048
+      morton_bits: 7
+    train:
+      seq_len: 128
+      batch_size: 2
+      grad_accum_steps: 8
+      num_workers: 2
+      prefetch_factor: 2
+      persistent_workers: true
+      lr: 0.0002
+      log_every: 20
+      ckpt_every: 200
+      max_steps: 0
+    data:
+      dataset_name: HuggingFaceFW/fineweb-edu
+      dataset_config: sample-10BT
+      dataset_split: train
+      streaming: true
+      text_field: text
+      max_examples: 0
+      max_chars_per_example: 0
+    inference:
+      max_new_tokens: 128
+      max_context_tokens: 128
+      do_sample: true
+      temperature: 0.85
+      top_k: 60
+      top_p: 0.92
+      repetition_penalty: 1.15
+
+  # 16GB+ VRAM profile.
+  large:
+    model:
+      dim: 448
+      heads: 8
+      experts: 8
+      max_reason_steps: 4
+      novelty_buf_size: 2048
+      morton_bits: 7
+    train:
+      seq_len: 160
+      batch_size: 2
+      grad_accum_steps: 8
+      num_workers: 2
+      persistent_workers: true
+    data:
+      max_examples: 0
