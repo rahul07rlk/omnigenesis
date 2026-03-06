@@ -39,10 +39,12 @@ def main():
         flush=True,
     )
     print(f"[RUN] config: {config_source_path}", flush=True)
+    dataset_cfg = data_cfg.dataset_config or "-"
     print(
         "[RUN] dataset: "
-        f"{data_cfg.dataset_name}/{data_cfg.dataset_config} "
-        f"split={data_cfg.dataset_split} streaming={data_cfg.streaming}",
+        f"{data_cfg.dataset_name}/{dataset_cfg} "
+        f"split={data_cfg.dataset_split} streaming={data_cfg.streaming} "
+        f"english_only={data_cfg.english_only}",
         flush=True,
     )
     print(
@@ -52,8 +54,10 @@ def main():
         f"rep_pen={inference_cfg.repetition_penalty}",
         flush=True,
     )
+    ckpt_path = os.getenv("OMNI_CKPT_PATH", f"omnigenesis_ckpt_{active_profile}.pt")
+    print(f"[RUN] checkpoint: {ckpt_path}", flush=True)
 
-    step, seq_count, data_state = load_checkpoint(model, optimizer, scaler)
+    step, seq_count, data_state = load_checkpoint(model, optimizer, scaler, filename=ckpt_path)
 
     train_thread = threading.Thread(
         target=background_training_loop,
@@ -68,6 +72,7 @@ def main():
             data_state,
             train_cfg,
             data_cfg,
+            ckpt_path,
         ),
         name="TrainingThread",
     )

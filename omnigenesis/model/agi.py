@@ -54,11 +54,11 @@ class OmniGenesisAGI(nn.Module):
             deep_out = self.norm(x_moe + z_out.unsqueeze(1))
 
             deep_full = torch.zeros_like(shallow)
-            deep_full = deep_full.index_copy(0, idx, deep_out)
+            deep_full = deep_full.index_copy(0, idx, deep_out.to(dtype=deep_full.dtype))
             mask3d = deep_mask.view(batch, 1, 1).expand_as(shallow)
             final = torch.where(mask3d, deep_full, shallow)
             confidence = x.new_zeros(batch)
-            confidence = confidence.index_copy(0, idx, confidence_sel)
+            confidence = confidence.index_copy(0, idx, confidence_sel.to(dtype=confidence.dtype))
         else:
             final = shallow
             z_loss = x.new_zeros(())

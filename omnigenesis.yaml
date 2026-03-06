@@ -2,7 +2,7 @@ runtime:
   # Set to one of: auto, small, balanced, t4_colab, large.
   # You can also override at runtime with:
   #   OMNI_PROFILE=small|balanced|t4_colab|large
-  active_profile: t4_colab
+  active_profile: auto
 
   auto_profile:
     cpu_profile: small
@@ -43,11 +43,11 @@ profiles:
       ckpt_every: 200
       max_steps: 0
     data:
-      dataset_name: daily_dialog
+      dataset_name: builtin_english_chat
       dataset_config: ""
       dataset_split: train
       streaming: false
-      text_field: dialog
+      text_field: text
       max_examples: 0
       max_chars_per_example: 0
       english_only: true

@@ -40,15 +40,15 @@ class UnifiedMoE(nn.Module):
         else:
             probs = F.softmax(logits, dim=-1)
 
-        top_p, top_i = torch.topk(probs, 2, dim=-1)
+        top_k = 2 if self.E > 1 else 1
+        top_p, top_i = torch.topk(probs, top_k, dim=-1)
         top_p = top_p / (top_p.sum(dim=-1, keepdim=True) + 1e-12)
 
         out = torch.zeros(total, dim, dtype=flat.dtype, device=flat.device)
 
         for eid in range(self.E):
-            sel0 = top_i[:, 0] == eid
-            sel1 = top_i[:, 1] == eid
-            sel = sel0 | sel1
+            matches = top_i == eid
+            sel = matches.any(dim=-1)
             pos = sel.nonzero(as_tuple=False).squeeze(1)
             if pos.numel() == 0:
                 continue
@@ -56,9 +56,9 @@ class UnifiedMoE(nn.Module):
                 pos = self.dispatcher.sort(flat, pos)
             tok = flat.index_select(0, pos)
             proc = self.experts[eid](tok.unsqueeze(1)).squeeze(1)
-            w = (top_p[pos, 0] * sel0[pos].float()) + (top_p[pos, 1] * sel1[pos].float())
+            w = (top_p[pos] * matches[pos].to(top_p.dtype)).sum(dim=-1)
             weighted = proc * w.unsqueeze(-1)
-            out = out.scatter_add(0, pos.unsqueeze(-1).expand_as(weighted), weighted)
+            out.scatter_add_(0, pos.unsqueeze(-1).expand_as(weighted), weighted)
 
         importance = probs.mean(dim=0)
         fi = F.one_hot(top_i, num_classes=self.E).float().sum(dim=1).mean(dim=0)

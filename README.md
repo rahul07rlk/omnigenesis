@@ -127,7 +127,7 @@ What happens at startup:
 1. Device is selected (`cuda` if available, else `cpu`).
 2. GPT-2 tokenizer is loaded.
 3. `OmniGenesisAGI` model is initialized.
-4. Checkpoint is loaded if present (`omnigenesis_ckpt.pt`).
+4. Checkpoint is loaded if present (`omnigenesis_ckpt_<profile>.pt` by default).
 5. Background training thread starts.
 6. Interactive CLI loop starts in the main thread.
 
@@ -140,7 +140,8 @@ Exit behavior:
 
 Checkpoint file:
 
-- `omnigenesis_ckpt.pt` in project root (default)
+- `omnigenesis_ckpt_<profile>.pt` in project root (default)
+- override with `OMNI_CKPT_PATH` if you need a custom location/name
 
 Saved state includes:
 
@@ -196,13 +197,13 @@ GTX 1650 defaults (`small`):
 
 - `dim=192`, `experts=4`, `max_reason_steps=2`
 - `seq_len=64`, `batch_size=1`, `grad_accum_steps=16`
-- default dataset: `daily_dialog` (English dialog), split `train`
+- default dataset: `builtin_english_chat` (internal English chat corpus), split `train`
 
 Google Colab T4 defaults (`t4_colab`):
 
 - `dim=320`, `heads=8`, `experts=8`
 - `seq_len=128`, `batch_size=2`, `grad_accum_steps=8`
-- dataset uses `daily_dialog` (English dialog), non-streaming
+- dataset uses `HuggingFaceFW/fineweb-edu` (`sample-10BT`), streaming
 - inference uses sampling (`temperature`, `top_k`, `top_p`, repetition penalty)
 
 ### Runtime overrides (without code edits)
@@ -212,6 +213,7 @@ Use environment variables only to choose profile/file:
 ```bash
 $env:OMNI_PROFILE="t4_colab"              # or small / balanced / large / auto
 $env:OMNI_CONFIG_PATH="C:\path\to\omnigenesis.yaml"
+$env:OMNI_CKPT_PATH="C:\path\to\checkpoint.pt"
 python omni_genesis.py
 ```
 
@@ -227,7 +229,7 @@ The dataset implementation is in [`omnigenesis/data/streaming_dataset.py`](omnig
 
 Current source:
 
-- `daily_dialog`, split `train` by default
+- `builtin_english_chat`, split `train` by default
 - configurable in `omnigenesis.yaml` (`profiles.*.data`)
 - supports plain text, prompt/response pairs, and message-list chat schemas
 - if dataset load fails (for example script-based datasets blocked by your `datasets` version), it auto-falls back to an internal English chat corpus so training continues

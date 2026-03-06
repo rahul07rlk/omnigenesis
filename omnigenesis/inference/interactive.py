@@ -16,11 +16,17 @@ def _sample_next_token(
     input_ids: torch.Tensor,
     cfg: InferenceConfig,
 ) -> torch.Tensor:
+    logits = logits.clone()
     # Repetition penalty to reduce loops on short, weakly-trained models.
     if cfg.repetition_penalty > 1.0 and input_ids.numel() > 0:
         for b in range(logits.size(0)):
             seen = torch.unique(input_ids[b])
-            logits[b, seen] = logits[b, seen] / cfg.repetition_penalty
+            seen_logits = logits[b, seen]
+            logits[b, seen] = torch.where(
+                seen_logits < 0,
+                seen_logits * cfg.repetition_penalty,
+                seen_logits / cfg.repetition_penalty,
+            )
 
     if not cfg.do_sample:
         return torch.argmax(logits, dim=-1, keepdim=True)

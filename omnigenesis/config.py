@@ -43,6 +43,19 @@ def _as_bool(value: Any, default: bool) -> bool:
     return bool(value)
 
 
+def _as_str_list(value: Any, default: list[str]) -> list[str]:
+    if value is None:
+        return list(default)
+    if isinstance(value, str):
+        items = [part.strip() for part in value.split(",")]
+        out = [part for part in items if part]
+        return out if out else list(default)
+    if isinstance(value, (list, tuple, set)):
+        out = [str(item).strip() for item in value if str(item).strip()]
+        return out if out else list(default)
+    return list(default)
+
+
 def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
     merged = copy.deepcopy(base)
     for key, value in override.items():
@@ -179,16 +192,42 @@ class TrainConfig:
 class DataConfig:
     def __init__(self, values: Optional[Dict[str, Any]] = None):
         values = values or {}
-        self.dataset_name = str(values.get("dataset_name", "wikitext"))
-        cfg_value = values.get("dataset_config", "wikitext-2-raw-v1")
+        self.dataset_name = str(values.get("dataset_name", "daily_dialog"))
+        cfg_value = values.get("dataset_config", "")
         self.dataset_config = None if cfg_value in {"", None} else str(cfg_value)
         self.dataset_split = str(values.get("dataset_split", "train"))
         self.streaming = _as_bool(values.get("streaming"), False)
-        self.text_field = str(values.get("text_field", "text"))
+        self.text_field = str(values.get("text_field", "dialog"))
         # 0 means unlimited.
-        self.max_examples = max(0, _as_int(values.get("max_examples"), 50000))
+        self.max_examples = max(0, _as_int(values.get("max_examples"), 0))
         # 0 means unlimited.
-        self.max_chars_per_example = max(0, _as_int(values.get("max_chars_per_example"), 4000))
+        self.max_chars_per_example = max(0, _as_int(values.get("max_chars_per_example"), 0))
+        self.english_only = _as_bool(values.get("english_only"), True)
+        ratio = _as_float(values.get("min_english_ratio"), 0.70)
+        self.min_english_ratio = min(max(ratio, 0.0), 1.0)
+        self.chat_messages_field = str(values.get("chat_messages_field", "messages"))
+        self.chat_role_field = str(values.get("chat_role_field", "role"))
+        self.chat_content_field = str(values.get("chat_content_field", "content"))
+        self.chat_role_fallback_fields = _as_str_list(
+            values.get("chat_role_fallback_fields"),
+            ["from", "speaker"],
+        )
+        self.chat_content_fallback_fields = _as_str_list(
+            values.get("chat_content_fallback_fields"),
+            ["value", "text", "utterance"],
+        )
+        self.prompt_field = str(values.get("prompt_field", "prompt"))
+        self.response_field = str(values.get("response_field", "response"))
+        self.prompt_fallback_fields = _as_str_list(
+            values.get("prompt_fallback_fields"),
+            ["instruction", "question", "query", "input"],
+        )
+        self.response_fallback_fields = _as_str_list(
+            values.get("response_fallback_fields"),
+            ["response", "output", "answer", "completion"],
+        )
+        # 0 means unlimited.
+        self.max_turns_per_example = max(0, _as_int(values.get("max_turns_per_example"), 0))
 
 
 class InferenceConfig:

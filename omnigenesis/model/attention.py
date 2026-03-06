@@ -29,28 +29,15 @@ class LinearAttention(nn.Module):
         k = F.elu(k * self.scale) + 1.0
 
         acc_dtype = torch.float32 if q.dtype in {torch.float16, torch.bfloat16} else q.dtype
-        kv_state = torch.zeros(
-            batch,
-            self.heads,
-            self.head_dim,
-            self.head_dim,
-            device=x.device,
-            dtype=acc_dtype,
-        )
-        k_state = torch.zeros(batch, self.heads, self.head_dim, device=x.device, dtype=acc_dtype)
-        out_steps = []
+        q_acc = q.to(acc_dtype)
+        k_acc = k.to(acc_dtype)
+        v_acc = v.to(acc_dtype)
 
-        for t in range(n_tokens):
-            kt = k[:, t].to(acc_dtype)
-            vt = v[:, t].to(acc_dtype)
-            qt = q[:, t].to(acc_dtype)
+        # Prefix accumulators over time for linear attention.
+        kv_prefix = torch.cumsum(k_acc.unsqueeze(-1) * v_acc.unsqueeze(-2), dim=1)
+        k_prefix = torch.cumsum(k_acc, dim=1)
 
-            kv_state = kv_state + torch.einsum("bhd,bhm->bhdm", kt, vt)
-            k_state = k_state + kt
-
-            denom_t = torch.einsum("bhd,bhd->bh", qt, k_state).clamp_min(1e-6)
-            out_t = torch.einsum("bhd,bhdm->bhm", qt, kv_state) / denom_t.unsqueeze(-1)
-            out_steps.append(out_t.to(q.dtype))
-
-        out = torch.stack(out_steps, dim=1)
+        numer = torch.einsum("bthd,bthdm->bthm", q_acc, kv_prefix)
+        denom = torch.einsum("bthd,bthd->bth", q_acc, k_prefix).clamp_min(1e-6)
+        out = (numer / denom.unsqueeze(-1)).to(q.dtype)
         return self.out(out.reshape(batch, n_tokens, dim))
