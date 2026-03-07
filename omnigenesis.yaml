@@ -25,8 +25,9 @@ profiles:
     model:
       vocab_size: 50257
       reason_threshold: 0.85
-      novelty_threshold: 0.10
+      novelty_threshold: 0.05  # Lowered from 0.10 to trigger more deep processing
       novelty_sketch_dim: 64
+      dropout: 0.10
       use_morton: true
       morton_proj_dim: 8
       morton_bits: 6
@@ -44,13 +45,26 @@ profiles:
       log_every: 25
       ckpt_every: 200
       max_steps: 0
+      label_smoothing: 0.05
+      val_every_steps: 200
+      val_batches: 8
+      eval_num_workers: 0
+      early_stopping_patience: 15  # Increased from 8 to 15
+      early_stopping_min_delta: 0.0005
+      lr_scheduler_patience: 2
+      lr_scheduler_factor: 0.5
+      min_lr: 0.00002
+      save_best_checkpoint: true
     data:
       dataset_name: builtin_english_chat
       dataset_config: ""
       dataset_split: train
       streaming: false
+      eval_split: validation
+      eval_streaming: null
       text_field: text
       max_examples: 0
+      eval_max_examples: 0
       max_chars_per_example: 0
       english_only: true
       min_english_ratio: 0.70
