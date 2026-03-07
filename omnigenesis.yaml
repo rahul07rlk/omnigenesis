@@ -1,7 +1,7 @@
 runtime:
-  # Set to one of: auto, small, balanced, t4_colab, large.
+  # Set to one of: auto, small, balanced, t4_colab, large, a100.
   # You can also override at runtime with:
-  #   OMNI_PROFILE=small|balanced|t4_colab|large
+  #   OMNI_PROFILE=small|balanced|t4_colab|large|a100
   active_profile: auto
 
   auto_profile:
@@ -14,8 +14,10 @@ runtime:
         profile: balanced
       - max_vram_gb: 16.5
         profile: t4_colab
-      - max_vram_gb: 999.0
+      - max_vram_gb: 32.0
         profile: large
+      - max_vram_gb: 999.0
+        profile: a100
 
 profiles:
   # Base values shared by all profiles.
@@ -151,3 +153,40 @@ profiles:
       persistent_workers: true
     data:
       max_examples: 0
+
+  # 40GB+ VRAM profile (A100 class).
+  a100:
+    model:
+      dim: 640
+      heads: 10
+      experts: 12
+      max_reason_steps: 6
+      novelty_buf_size: 4096
+      morton_bits: 8
+    train:
+      seq_len: 256
+      batch_size: 8
+      grad_accum_steps: 2
+      num_workers: 4
+      prefetch_factor: 4
+      persistent_workers: true
+      lr: 0.00015
+      log_every: 20
+      ckpt_every: 250
+      max_steps: 0
+    data:
+      dataset_name: HuggingFaceFW/fineweb-edu
+      dataset_config: sample-10BT
+      dataset_split: train
+      streaming: true
+      text_field: text
+      max_examples: 0
+      max_chars_per_example: 0
+    inference:
+      max_new_tokens: 192
+      max_context_tokens: 256
+      do_sample: true
+      temperature: 0.8
+      top_k: 80
+      top_p: 0.9
+      repetition_penalty: 1.15

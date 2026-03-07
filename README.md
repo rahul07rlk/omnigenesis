@@ -4,80 +4,340 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
 
-Modular experimental training + interactive inference project built with PyTorch.
+OmniGenesis is a modular PyTorch project for **concurrent language-model training and interactive chat inference** in one process.
 
-This repository runs a background training loop while serving interactive text generation in the foreground.  
-The codebase has been split into focused modules to support easier maintenance and upgrades.
+The system is designed around adaptive compute:
+- easy inputs use a shallow path
+- novel inputs route through deeper MoE + reasoning
+- training runs continuously in a background thread while you chat in the foreground
 
-This project is open source and released under the terms of the [MIT License](LICENSE), and is free to use in personal, academic, and commercial settings subject to those terms.
+This repository is open source under the [MIT License](LICENSE).
 
-## Highlights
+## What Makes This Model Different
 
-- Modular package layout (`omnigenesis/`) instead of one large script.
-- Concurrent training and inference with thread-safe model access.
-- Resumable token-chunk dataset pipeline (streaming or non-streaming).
-- Checkpoint save/load with optimizer and AMP scaler state.
-- Weight tying preserved across checkpoint resume.
-- Mixed precision support with safe CPU fallback.
+OmniGenesis combines several methods to push efficiency on limited and high-end GPUs:
 
-## Repository Structure
+1. **Novelty-gated depth**
+Only sequences that look novel go through the expensive deep path.
+
+2. **Top-2 Mixture of Experts (MoE)**
+Tokens are routed to a small subset of experts instead of all experts.
+
+3. **Morton (Z-order) dispatch**
+Selected token indices are locality-sorted before expert execution for better memory access behavior.
+
+4. **Linear attention with RoPE**
+Experts use linear-time prefix attention (instead of quadratic full attention) plus rotary position encoding.
+
+5. **Iterative reasoning loop**
+A confidence head decides when to stop refining latent state, so compute can stop early.
+
+6. **Concurrent train + infer runtime**
+One lock-protected model supports safe updates and safe generation from separate threads.
+
+## End-to-End System Flow
 
 ```text
-omni_genesis.py                      # Compatibility launcher (entrypoint)
-requirements.txt
-requirements-dev.txt
-README.md
-LICENSE
-CODE_OF_CONDUCT.md
-CONTRIBUTING.md
-pytest.ini
-pyproject.toml
-.pre-commit-config.yaml
-.github/workflows/ci.yml
-omnigenesis.yaml                     # System profiles + runtime config
-tests/
-  test_model_smoke.py
-  test_data_pipeline.py
-omnigenesis/
-  __init__.py
-  app.py                             # Main startup orchestration
-  config.py                          # Hyperparameters/config object
-  concurrency.py                     # Shared lock/event/thread helpers
-  data/
-    streaming_dataset.py             # ResumableStreamingDataset
-  model/
-    rope.py                          # RoPE helpers
-    attention.py                     # LinearAttention
-    expert.py                        # DomainExpert
-    dispatcher.py                    # MortonDispatcher
-    novelty.py                       # NoveltyBuffer
-    moe.py                           # UnifiedMoE
-    reasoning.py                     # ReasoningLoop
-    agi.py                           # OmniGenesisAGI
-  inference/
-    interactive.py                   # Interactive prompt loop
-  training/
-    checkpointing.py                 # save_checkpoint/load_checkpoint
-    background.py                    # Background training thread loop
+                 +-----------------------------+
+                 |  omnigenesis.yaml profiles |
+                 +-------------+---------------+
+                               |
+                               v
+                  +---------------------------+
+                  | app.py startup orchestration |
+                  +---------------------------+
+                     | device/tokenizer/model
+                     | checkpoint resume
+                     v
+         +----------------------+    +----------------------+
+         | Training Thread      |    | Main Thread          |
+         | background.py        |    | interactive.py       |
+         +----------------------+    +----------------------+
+         | stream/chunk dataset |    | prompt -> generate   |
+         | forward/backward AMP |    | top-k/top-p sampling |
+         | optimizer step       |    | repetition penalty   |
+         | periodic checkpoint  |    |                      |
+         +----------+-----------+    +-----------+----------+
+                    \_____________________ __________________/
+                                          v
+                                  shared model + lock
 ```
 
-## Requirements
+## Model Flow (Inside `OmniGenesisAGI`)
 
-- Python 3.10+ recommended
-- `pip` up to date
-- GPU optional (CUDA-enabled PyTorch if you want GPU training)
+Implementation: [`omnigenesis/model/agi.py`](omnigenesis/model/agi.py)
 
-Install dependencies:
+1. **Token embedding**
+`input_ids -> embed -> x` where `x` is `[batch, tokens, dim]`.
+
+2. **Sequence summary**
+`z_seq = mean(x, dim=tokens)`.
+
+3. **Novelty scoring**
+`NoveltyBuffer.novelty_score(z_seq)` returns `1 - max_cosine_similarity` against a compact memory sketch.
+
+4. **Depth decision**
+`deep_mask = novelty > novelty_threshold`.
+
+5. **Shallow path**
+Always computed as `LayerNorm(x)`.
+
+6. **Deep path (only for novel rows)**
+`x_d -> UnifiedMoE -> reason projection -> ReasoningLoop -> residual merge + norm`.
+
+7. **Selective merge**
+Deep outputs are copied back only for deep rows, shallow outputs are used for others.
+
+8. **Tied output head**
+`head.weight = embed.weight` and logits are produced with tied weights.
+
+### Loss Function
+
+Defined in `OmniGenesisAGI.total_loss`:
+
+```text
+total_loss = cross_entropy + 0.01 * aux_loss + 0.001 * z_loss
+```
+
+- `cross_entropy`: next-token objective
+- `aux_loss`: MoE load-balancing term
+- `z_loss`: router stabilizer from `logsumexp(logits)^2`
+
+## Core Technologies in Detail
+
+### 1) Novelty Buffer
+
+Implementation: [`omnigenesis/model/novelty.py`](omnigenesis/model/novelty.py)
+
+- Uses a random sign projection matrix `R` to sketch embeddings into a low-dimensional normalized space.
+- Keeps a ring buffer of sketches.
+- Novelty score is inverse nearest similarity to memory.
+- During training, sequence sketches are continuously added.
+
+Why it matters:
+- pushes expensive compute only when needed
+- reduces average inference/training compute
+
+### 2) Unified MoE (Top-2 Router)
+
+Implementation: [`omnigenesis/model/moe.py`](omnigenesis/model/moe.py)
+
+- Router maps each token to expert logits.
+- Training can inject Gumbel noise before softmax for exploration.
+- Top-2 experts (or top-1 if only one expert) are selected per token.
+- Outputs from selected experts are combined by normalized routing weights.
+- Includes auxiliary balancing loss and router regularization (`z_loss`).
+
+Why it matters:
+- more capacity than a dense block at similar compute budget
+- expert specialization emerges over training
+
+### 3) Morton Dispatcher
+
+Implementation: [`omnigenesis/model/dispatcher.py`](omnigenesis/model/dispatcher.py)
+
+- Projects token states into quantized coordinates.
+- Interleaves coordinate bits into Morton codes.
+- Sorts routed token indices by code before expert execution.
+
+Why it matters:
+- improves locality patterns for batched expert work
+- helps keep routing overhead efficient
+
+### 4) Domain Experts (Linear Attention + FFN)
+
+Implementation: [`omnigenesis/model/expert.py`](omnigenesis/model/expert.py), [`omnigenesis/model/attention.py`](omnigenesis/model/attention.py)
+
+- Each expert uses:
+  - linear attention with RoPE
+  - residual MLP block
+  - layer norms
+- Linear attention uses prefix accumulators instead of full attention matrix.
+- Expert parameters can auto-freeze when gradient momentum remains near zero.
+
+Why it matters:
+- lower time/memory growth with longer sequences than standard full attention
+- expert freezing can reduce unnecessary updates
+
+### 5) Iterative Reasoning Loop
+
+Implementation: [`omnigenesis/model/reasoning.py`](omnigenesis/model/reasoning.py)
+
+- Refines latent state `z` for up to `max_reason_steps`.
+- Confidence head predicts `kappa`; loop stops early when `kappa >= reason_threshold`.
+- Uses activation checkpointing during training to save memory.
+
+Why it matters:
+- adaptive computation depth
+- memory-efficient deep refinement
+
+## Data Pipeline
+
+Implementation: [`omnigenesis/data/streaming_dataset.py`](omnigenesis/data/streaming_dataset.py)
+
+Features:
+- Hugging Face dataset loading in streaming or non-streaming mode
+- resilient fallback to built-in English chat corpus if dataset load fails
+- schema-flexible text extraction:
+  - plain text fields
+  - chat messages arrays
+  - prompt/response pairs
+- optional English-like filtering (`english_only`, `min_english_ratio`)
+- fixed-length token chunking for next-token prediction
+- resumable internal state (`buffer`, emitted sequences, examples seen, skips)
+
+Notes:
+- `builtin_english_chat` is a tiny internal fallback corpus for robustness, not a replacement for large-scale data.
+- For real quality gains, use large clean corpora (for example FineWeb sample configs already provided).
+
+## Training Runtime
+
+Implementation: [`omnigenesis/training/background.py`](omnigenesis/training/background.py)
+
+- Background thread:
+  - creates resumable dataset iterator
+  - uses AMP autocast on CUDA
+  - applies gradient accumulation + clipping
+  - periodically checkpoints
+- Uses a shared `model_lock` so train and infer do not race.
+- Handles non-finite loss by skipping update and clearing grads.
+- Automatically retries DataLoader with `num_workers=0` if multiprocessing fails.
+
+## Checkpointing
+
+Implementation: [`omnigenesis/training/checkpointing.py`](omnigenesis/training/checkpointing.py)
+
+- Saves:
+  - model state
+  - optimizer state
+  - GradScaler state
+  - global step + sequence count
+  - dataset resume state
+- Uses atomic temp-file replace with retry.
+- If replace fails, falls back to a `.failedsave-*` checkpoint file.
+- Restores tied weights after load.
+
+## Inference Runtime
+
+Implementation: [`omnigenesis/inference/interactive.py`](omnigenesis/inference/interactive.py)
+
+- Interactive CLI loop with configurable:
+  - `max_new_tokens`
+  - `max_context_tokens`
+  - sampling/greedy
+  - temperature, top-k, top-p
+  - sign-aware repetition penalty
+- Context is truncated to configured max window to bound cost.
+
+## Configuration and Profiles
+
+Config source: [`omnigenesis.yaml`](omnigenesis.yaml)
+
+Profile selection:
+- `runtime.active_profile: auto` (default)
+- override with `OMNI_PROFILE`
+
+Current profiles:
+- `small` (4GB class)
+- `balanced` (6-10GB class)
+- `t4_colab` (T4 class)
+- `large` (16-32GB class)
+- `a100` (40GB+ class)
+
+Default auto VRAM rules:
+- `<= 4.5GB -> small`
+- `<= 10GB -> balanced`
+- `<= 16.5GB -> t4_colab`
+- `<= 32GB -> large`
+- `> 32GB -> a100`
+
+Environment overrides:
+
+```bash
+# Windows PowerShell
+$env:OMNI_PROFILE="a100"  # auto|small|balanced|t4_colab|large|a100
+$env:OMNI_CONFIG_PATH="C:\path\to\omnigenesis.yaml"
+$env:OMNI_CKPT_PATH="C:\path\to\checkpoint.pt"
+python omni_genesis.py
+```
+
+## Quick Start
+
+### 1) Install
 
 ```bash
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 ```
 
-If you need a specific CUDA build of PyTorch, install PyTorch first from the official selector, then run:
+If you need a specific CUDA build, install PyTorch first from official wheels, then:
 
 ```bash
 python -m pip install -r requirements.txt --no-deps
+```
+
+### 2) Run
+
+```bash
+python omni_genesis.py
+```
+
+Startup sequence:
+1. detect device
+2. load tokenizer
+3. build model from profile config
+4. resume checkpoint if present
+5. start training thread
+6. enter interactive chat loop
+
+Exit:
+- type `exit` or `quit`
+- or `Ctrl+C`
+
+### 3) Colab T4 Example
+
+```python
+%cd /content
+!git clone <your-repo-url>
+%cd /content/<your-repo-folder>
+!pip install -r requirements.txt
+import os
+os.environ["OMNI_PROFILE"] = "t4_colab"
+!python omni_genesis.py
+```
+
+### 4) A100 Example
+
+```bash
+export OMNI_PROFILE=a100
+python omni_genesis.py
+```
+
+## Repository Structure
+
+```text
+omni_genesis.py                      # Launcher entrypoint
+omnigenesis.yaml                     # Runtime profiles and defaults
+omnigenesis/
+  app.py                             # Main orchestration
+  config.py                          # Config loading and profile resolve
+  concurrency.py                     # Lock/event/thread helpers
+  data/streaming_dataset.py          # Resumable dataset pipeline
+  model/
+    agi.py                           # Main model graph and total loss
+    moe.py                           # Router + expert dispatch/merge
+    dispatcher.py                    # Morton sorting
+    expert.py                        # Expert block
+    attention.py                     # Linear attention + RoPE
+    novelty.py                       # Novelty sketch memory
+    reasoning.py                     # Iterative confidence loop
+  training/
+    background.py                    # Training thread
+    checkpointing.py                 # Save/load with retries
+  inference/interactive.py           # CLI generation loop
+tests/
+  test_model_smoke.py
+  test_data_pipeline.py
 ```
 
 ## Testing and Quality
@@ -88,13 +348,13 @@ Run tests:
 pytest
 ```
 
-Run linter:
+Run lint:
 
 ```bash
 ruff check .
 ```
 
-Optional pre-commit setup:
+Optional pre-commit:
 
 ```bash
 python -m pip install -r requirements-dev.txt
@@ -102,202 +362,57 @@ pre-commit install
 pre-commit run --all-files
 ```
 
-## Quick Start
-
-From the repository root:
-
-```bash
-python omni_genesis.py
-```
-
-Google Colab (T4) recommended startup:
-
-```bash
-%cd /content
-!git clone <your-repo-url>
-%cd /content/<your-repo-folder>
-!pip install -r requirements.txt
-import os
-os.environ["OMNI_PROFILE"] = "t4_colab"
-!python omni_genesis.py
-```
-
-What happens at startup:
-
-1. Device is selected (`cuda` if available, else `cpu`).
-2. GPT-2 tokenizer is loaded.
-3. `OmniGenesisAGI` model is initialized.
-4. Checkpoint is loaded if present (`omnigenesis_ckpt_<profile>.pt` by default).
-5. Background training thread starts.
-6. Interactive CLI loop starts in the main thread.
-
-Exit behavior:
-
-- Type `exit` or `quit`, or press `Ctrl+C`.
-- App signals shutdown, waits for training thread to checkpoint, then exits.
-
-## Checkpointing and Resume
-
-Checkpoint file:
-
-- `omnigenesis_ckpt_<profile>.pt` in project root (default)
-- override with `OMNI_CKPT_PATH` if you need a custom location/name
-
-Saved state includes:
-
-- model weights
-- optimizer state
-- AMP scaler state
-- global step + sequence counters
-- resumable dataset state (buffer/progress)
-
-Resume behavior:
-
-- If checkpoint exists, training resumes from saved state.
-- Weight tying (`head.weight` and `embed.weight`) is explicitly restored after load.
-
-## Configuration
-
-System config is loaded from:
-
-- [`omnigenesis.yaml`](omnigenesis.yaml)
-
-Code reads this file at startup and builds:
-
-- `AGIConfig` (model)
-- `TrainConfig` (optimizer/loop/sequence)
-- `DataConfig` (dataset + split)
-- `InferenceConfig` (generation limits)
-
-Important knobs:
-
-- `dim`, `heads` for model size/attention shape
-- `experts` for MoE capacity
-- `max_reason_steps`, `reason_threshold` for reasoning loop
-- novelty buffer sizing and threshold settings
-- Morton dispatch options (`use_morton`, projection params)
-- `seq_len`, `batch_size`, `grad_accum_steps`
-- `max_steps` for bounded training runs
-- dataset name/config/split + `max_examples` cap
-- inference `max_new_tokens` + `max_context_tokens`
-
-### Profile-based scaling
-
-The YAML file supports `small`, `balanced`, `t4_colab`, and `large` profiles plus `auto` selection by VRAM.
-
-Default `auto` behavior:
-
-- <=4.5GB VRAM -> `small`
-- <=10GB VRAM -> `balanced`
-- <=16.5GB VRAM -> `t4_colab`
-- above that -> `large`
-- CPU-only -> `small`
-
-GTX 1650 defaults (`small`):
-
-- `dim=192`, `experts=4`, `max_reason_steps=2`
-- `seq_len=64`, `batch_size=1`, `grad_accum_steps=16`
-- default dataset: `builtin_english_chat` (internal English chat corpus), split `train`
-
-Google Colab T4 defaults (`t4_colab`):
-
-- `dim=320`, `heads=8`, `experts=8`
-- `seq_len=128`, `batch_size=2`, `grad_accum_steps=8`
-- dataset uses `HuggingFaceFW/fineweb-edu` (`sample-10BT`), streaming
-- inference uses sampling (`temperature`, `top_k`, `top_p`, repetition penalty)
-
-### Runtime overrides (without code edits)
-
-Use environment variables only to choose profile/file:
-
-```bash
-$env:OMNI_PROFILE="t4_colab"              # or small / balanced / large / auto
-$env:OMNI_CONFIG_PATH="C:\path\to\omnigenesis.yaml"
-$env:OMNI_CKPT_PATH="C:\path\to\checkpoint.pt"
-python omni_genesis.py
-```
-
-For system-specific tuning, edit `omnigenesis.yaml` only.
-
-## Data Pipeline
-
-The dataset implementation is in [`omnigenesis/data/streaming_dataset.py`](omnigenesis/data/streaming_dataset.py).
-
-- Uses Hugging Face `datasets` (streaming or regular mode)
-- Produces fixed-length next-token chunks
-- Tracks internal cursor/buffer state for resume
-
-Current source:
-
-- `builtin_english_chat`, split `train` by default
-- configurable in `omnigenesis.yaml` (`profiles.*.data`)
-- supports plain text, prompt/response pairs, and message-list chat schemas
-- if dataset load fails (for example script-based datasets blocked by your `datasets` version), it auto-falls back to an internal English chat corpus so training continues
-- you can force this local fallback by setting `dataset_name: builtin_english_chat`
-- if `DataLoader` multiprocessing is blocked on Windows, training automatically retries with `num_workers=0`
-
-## Training/Inference Concurrency Model
-
-- A single global `model_lock` serializes model forward/backward/step and inference forward.
-- Background training loop:
-  - loads micro-batches from streaming dataset
-  - applies AMP context (`autocast("cuda")` on GPU, `nullcontext()` on CPU)
-  - accumulates gradients and steps optimizer periodically
-  - saves checkpoints outside lock to reduce inference blocking
-- Inference loop:
-  - runs under `torch.no_grad()`
-  - temporarily switches model to eval for each generation step
-  - restores previous train/eval mode in `finally`
-  - truncates context to a configurable window (`max_context_tokens`)
-
-## Development Notes
-
-- Main orchestration logic is in [`omnigenesis/app.py`](omnigenesis/app.py).
-- `omni_genesis.py` remains as a stable launcher path.
-- Import boundaries are split by responsibility to minimize coupling.
-
-Recommended maintenance workflow:
-
-1. Implement changes in the smallest relevant module.
-2. Keep cross-module imports one-directional (app -> subsystems).
-3. Add/adjust tests when behavior changes.
-4. Run static checks and smoke runs before commit.
-
 ## Troubleshooting
 
-`ModuleNotFoundError: No module named 'torch'`
+### `Dataset scripts are no longer supported`
 
-- Install dependencies from `requirements.txt`.
+Your `datasets` version blocked script-style dataset loaders.  
+OmniGenesis will auto-fallback to internal English chat corpus so training still runs.
 
-Hugging Face dataset/network errors
+### Repeated outputs like `name name name`
 
-- Verify internet access and that dataset endpoints are reachable.
-- Retry startup; streaming errors are retried in training loop.
+Model is undertrained or trained on non-chat-heavy text.  
+Increase training steps on quality conversational data and keep repetition penalty > 1.0.
 
-OOM on small GPUs
+### CUDA OOM
 
-- Lower model dimensions/expert count.
-- Reduce sequence length or generation length.
-- Prefer smaller batch size and/or larger accumulation interval.
+Reduce:
+- `dim`
+- `experts`
+- `seq_len`
+- `batch_size`
 
-## Code of Conduct
+Or increase `grad_accum_steps`.
 
-This project follows the Contributor Covenant.
+### Slow/limited HF downloads
 
-- See [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)
+Set `HF_TOKEN` for authenticated Hugging Face requests and better rate limits.
+
+## Production Notes
+
+This repository is an experimental research-oriented training stack, but the codebase includes several production-minded behaviors:
+- explicit profile-based hardware scaling
+- resumable stateful streaming ingestion
+- failure-tolerant checkpoint writes
+- safe train/infer concurrency
+- deterministic config surfaces through `omnigenesis.yaml`
+
+For production deployment, add:
+- service API layer (instead of CLI)
+- observability (metrics, traces, alerts)
+- dataset governance and eval gates
+- security hardening and sandboxed execution policy
 
 ## Contributing
 
-Please read:
+Read [CONTRIBUTING.md](CONTRIBUTING.md) and [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
 
-- [CONTRIBUTING.md](CONTRIBUTING.md)
-
-Pull requests should keep modules focused, preserve thread safety, and include
-clear reasoning for training-loop behavior changes.
+Contributions should preserve:
+- thread safety
+- checkpoint compatibility
+- profile-driven configurability
+- clear tests for behavior changes
 
 ## License
 
-This project is licensed under the MIT License.
-
-- See [LICENSE](LICENSE)
-- Open-source use is permitted, including modification, redistribution, and commercial use, provided the copyright and license notice are retained.
+MIT License. See [LICENSE](LICENSE).
