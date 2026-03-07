@@ -20,7 +20,9 @@ class UnifiedMoE(nn.Module):
         super().__init__()
         self.E = cfg.experts
         self.router = nn.Linear(cfg.dim, cfg.experts)
-        self.experts = nn.ModuleList([DomainExpert(cfg.dim, cfg.heads) for _ in range(cfg.experts)])
+        self.experts = nn.ModuleList(
+            [DomainExpert(cfg.dim, cfg.heads, cfg.dropout) for _ in range(cfg.experts)]
+        )
         self.dispatcher = (
             MortonDispatcher(cfg.dim, cfg.morton_proj_dim, cfg.morton_bits) if cfg.use_morton else None
         )

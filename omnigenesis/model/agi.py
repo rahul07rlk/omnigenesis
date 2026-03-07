@@ -20,6 +20,7 @@ class OmniGenesisAGI(nn.Module):
         super().__init__()
         self.cfg = cfg
         self.embed = nn.Embedding(cfg.vocab_size, cfg.dim)
+        self.emb_drop = nn.Dropout(cfg.dropout)
         self.moe = UnifiedMoE(cfg)
         self.proj_reason = nn.Sequential(
             nn.Linear(cfg.dim, cfg.dim),
@@ -33,7 +34,7 @@ class OmniGenesisAGI(nn.Module):
 
     def forward(self, input_ids: torch.Tensor) -> Dict:
         batch, _ = input_ids.shape
-        x = self.embed(input_ids)
+        x = self.emb_drop(self.embed(input_ids))
         z_seq = x.mean(dim=1)
 
         novelty = self.novelty_buf.novelty_score(z_seq.detach())
@@ -75,10 +76,24 @@ class OmniGenesisAGI(nn.Module):
             "n_deep": int(deep_mask.sum().item()),
         }
 
-    def total_loss(self, out: dict, targets: torch.Tensor) -> torch.Tensor:
-        ce = F.cross_entropy(
-            out["logits"].view(-1, out["logits"].size(-1)),
-            targets.view(-1),
-            ignore_index=-1,
-        )
+    def ce_loss(self, logits: torch.Tensor, targets: torch.Tensor, label_smoothing: float = 0.0) -> torch.Tensor:
+        kwargs = {"ignore_index": -1}
+        if label_smoothing > 0:
+            kwargs["label_smoothing"] = float(label_smoothing)
+        try:
+            return F.cross_entropy(
+                logits.view(-1, logits.size(-1)),
+                targets.view(-1),
+                **kwargs,
+            )
+        except TypeError:
+            kwargs.pop("label_smoothing", None)
+            return F.cross_entropy(
+                logits.view(-1, logits.size(-1)),
+                targets.view(-1),
+                **kwargs,
+            )
+
+    def total_loss(self, out: dict, targets: torch.Tensor, label_smoothing: float = 0.0) -> torch.Tensor:
+        ce = self.ce_loss(out["logits"], targets, label_smoothing=label_smoothing)
         return ce + 0.01 * out["aux_loss"] + 0.001 * out["z_loss"]

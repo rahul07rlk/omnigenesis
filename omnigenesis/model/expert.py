@@ -7,14 +7,16 @@ from .attention import LinearAttention
 
 
 class DomainExpert(nn.Module):
-    def __init__(self, dim: int, heads: int):
+    def __init__(self, dim: int, heads: int, dropout: float = 0.0):
         super().__init__()
         self.attn = LinearAttention(dim, heads)
+        self.resid_drop = nn.Dropout(dropout)
         self.ffn = nn.Sequential(
             nn.Linear(dim, dim * 4),
             nn.GELU(),
             nn.Linear(dim * 4, dim),
         )
+        self.ffn_drop = nn.Dropout(dropout)
         self.norm1 = nn.LayerNorm(dim)
         self.norm2 = nn.LayerNorm(dim)
         self.register_buffer("grad_momentum", torch.zeros(1))
@@ -59,7 +61,8 @@ class DomainExpert(nn.Module):
         if self.frozen:
             x_detached = x.detach()
             with torch.no_grad():
-                h = self.attn(self.norm1(x_detached))
-                delta = self.ffn(self.norm2(x_detached + h))
+                h = self.resid_drop(self.attn(self.norm1(x_detached)))
+                delta = self.resid_drop(self.ffn_drop(self.ffn(self.norm2(x_detached + h))))
             return x + delta
-        return x + self.ffn(self.norm2(x + self.attn(self.norm1(x))))
+        h = self.resid_drop(self.attn(self.norm1(x)))
+        return x + self.resid_drop(self.ffn_drop(self.ffn(self.norm2(x + h))))

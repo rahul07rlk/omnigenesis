@@ -158,6 +158,7 @@ class AGIConfig:
         self.use_morton = _as_bool(values.get("use_morton"), True)
         self.morton_proj_dim = max(1, _as_int(values.get("morton_proj_dim"), 8))
         self.morton_bits = max(1, _as_int(values.get("morton_bits"), 6))
+        self.dropout = min(max(_as_float(values.get("dropout"), 0.0), 0.0), 0.5)
 
         if self.dim % self.heads != 0:
             raise ValueError(
@@ -187,6 +188,22 @@ class TrainConfig:
         self.ckpt_every = max(1, _as_int(values.get("ckpt_every"), 200))
         # 0 means unlimited.
         self.max_steps = _as_int(values.get("max_steps"), 0)
+        self.label_smoothing = min(max(_as_float(values.get("label_smoothing"), 0.0), 0.0), 0.2)
+        self.val_every_steps = max(0, _as_int(values.get("val_every_steps"), 0))
+        self.val_batches = max(1, _as_int(values.get("val_batches"), 8))
+        self.eval_num_workers = max(0, _as_int(values.get("eval_num_workers"), 0))
+        self.early_stopping_patience = max(0, _as_int(values.get("early_stopping_patience"), 0))
+        self.early_stopping_min_delta = max(
+            0.0,
+            _as_float(values.get("early_stopping_min_delta"), 0.0),
+        )
+        self.lr_scheduler_patience = max(0, _as_int(values.get("lr_scheduler_patience"), 0))
+        self.lr_scheduler_factor = min(
+            max(_as_float(values.get("lr_scheduler_factor"), 0.5), 0.1),
+            0.99,
+        )
+        self.min_lr = max(0.0, _as_float(values.get("min_lr"), 0.0))
+        self.save_best_checkpoint = _as_bool(values.get("save_best_checkpoint"), True)
 
 
 class DataConfig:
@@ -197,9 +214,17 @@ class DataConfig:
         self.dataset_config = None if cfg_value in {"", None} else str(cfg_value)
         self.dataset_split = str(values.get("dataset_split", "train"))
         self.streaming = _as_bool(values.get("streaming"), False)
+        eval_split = str(values.get("eval_split", "validation")).strip()
+        self.eval_split = "" if eval_split.lower() in {"", "-", "none", "off", "disabled"} else eval_split
+        eval_streaming_value = values.get("eval_streaming", None)
+        self.eval_streaming: Optional[bool] = (
+            None if eval_streaming_value is None else _as_bool(eval_streaming_value, self.streaming)
+        )
         self.text_field = str(values.get("text_field", "dialog"))
         # 0 means unlimited.
         self.max_examples = max(0, _as_int(values.get("max_examples"), 0))
+        # 0 means unlimited.
+        self.eval_max_examples = max(0, _as_int(values.get("eval_max_examples"), 0))
         # 0 means unlimited.
         self.max_chars_per_example = max(0, _as_int(values.get("max_chars_per_example"), 0))
         self.english_only = _as_bool(values.get("english_only"), True)

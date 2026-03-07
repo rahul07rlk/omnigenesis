@@ -15,6 +15,7 @@ from .training.checkpointing import load_checkpoint
 
 
 def main():
+    shutdown_event.clear()
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"[RUN] Running on: {device.upper()}")
     if device == "cuda":
@@ -22,6 +23,8 @@ def main():
 
     tokenizer = AutoTokenizer.from_pretrained("gpt2")
     tokenizer.pad_token = tokenizer.eos_token
+    # Disable GPT-2 max-length warnings during dataset tokenization; sequence windows are controlled by config.
+    tokenizer.model_max_length = 1_000_000_000
 
     model = OmniGenesisAGI(cfg).to(device)
     optimizer = torch.optim.AdamW(
@@ -29,6 +32,15 @@ def main():
         lr=train_cfg.lr,
         weight_decay=train_cfg.weight_decay,
     )
+    scheduler = None
+    if train_cfg.lr_scheduler_patience > 0 and train_cfg.lr_scheduler_factor < 1.0:
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            mode="min",
+            factor=train_cfg.lr_scheduler_factor,
+            patience=train_cfg.lr_scheduler_patience,
+            min_lr=train_cfg.min_lr,
+        )
     scaler = GradScaler("cuda", enabled=(device == "cuda"))
 
     print(
@@ -54,10 +66,22 @@ def main():
         f"rep_pen={inference_cfg.repetition_penalty}",
         flush=True,
     )
+    print(
+        "[RUN] regularization: "
+        f"dropout={cfg.dropout} label_smoothing={train_cfg.label_smoothing} "
+        f"val_every={train_cfg.val_every_steps} early_stop_patience={train_cfg.early_stopping_patience}",
+        flush=True,
+    )
     ckpt_path = os.getenv("OMNI_CKPT_PATH", f"omnigenesis_ckpt_{active_profile}.pt")
     print(f"[RUN] checkpoint: {ckpt_path}", flush=True)
 
-    step, seq_count, data_state = load_checkpoint(model, optimizer, scaler, filename=ckpt_path)
+    step, seq_count, data_state = load_checkpoint(
+        model,
+        optimizer,
+        scaler,
+        filename=ckpt_path,
+        scheduler=scheduler,
+    )
 
     train_thread = threading.Thread(
         target=background_training_loop,
@@ -73,6 +97,7 @@ def main():
             train_cfg,
             data_cfg,
             ckpt_path,
+            scheduler,
         ),
         name="TrainingThread",
     )

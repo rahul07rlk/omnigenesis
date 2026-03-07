@@ -8,8 +8,34 @@ import torch
 from torch.amp import GradScaler
 
 
+def _remap_model_state_for_compat(model, state_dict: dict) -> Optional[dict]:
+    target_keys = set(model.state_dict().keys())
+    remapped = dict(state_dict)
+    changed = False
+    for key, value in state_dict.items():
+        if ".ffn.3." in key:
+            candidate = key.replace(".ffn.3.", ".ffn.2.")
+            if candidate in target_keys and candidate not in remapped:
+                remapped[candidate] = value
+                changed = True
+        if ".ffn.2." in key:
+            candidate = key.replace(".ffn.2.", ".ffn.3.")
+            if candidate in target_keys and candidate not in remapped:
+                remapped[candidate] = value
+                changed = True
+    return remapped if changed else None
+
+
 def _atomic_save_with_retry(payload: dict, filename: str, retries: int = 4, delay_s: float = 0.35) -> bool:
     target = Path(filename)
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+    except Exception as exc:
+        print(
+            f"[ERROR] Could not create checkpoint directory '{target.parent}': {exc}",
+            flush=True,
+        )
+        return False
     last_error: Optional[Exception] = None
     for attempt in range(retries + 1):
         tmp_name = (
@@ -58,6 +84,7 @@ def save_checkpoint(
     seq_count: int,
     filename: str = "omnigenesis_ckpt.pt",
     dataset_state: Optional[dict] = None,
+    scheduler=None,
 ) -> None:
     payload = {
         "step": step,
@@ -68,6 +95,11 @@ def save_checkpoint(
     }
     if dataset_state is not None:
         payload["dataset_state"] = dataset_state
+    if scheduler is not None:
+        try:
+            payload["scheduler_state_dict"] = scheduler.state_dict()
+        except Exception as exc:
+            print(f"[WARN] Could not serialize scheduler state: {exc}", flush=True)
     ok = _atomic_save_with_retry(payload, filename)
     if not ok:
         return
@@ -80,23 +112,56 @@ def load_checkpoint(
     optimizer,
     scaler: GradScaler,
     filename: str = "omnigenesis_ckpt.pt",
+    scheduler=None,
 ) -> Tuple[int, int, Optional[dict]]:
     if os.path.exists(filename):
         map_location = "cuda" if torch.cuda.is_available() else "cpu"
         try:
-            ckpt = torch.load(filename, map_location=map_location, weights_only=True)
-        except TypeError:
-            ckpt = torch.load(filename, map_location=map_location)
-        try:
-            model.load_state_dict(ckpt["model_state_dict"])
-            optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+            try:
+                ckpt = torch.load(filename, map_location=map_location, weights_only=True)
+            except TypeError:
+                ckpt = torch.load(filename, map_location=map_location)
         except Exception as exc:
             print(
-                f"[WARN] Checkpoint exists but is incompatible with current config: {exc}",
+                f"[WARN] Could not read checkpoint '{filename}': {exc}",
                 flush=True,
             )
-            print("[INFO] Starting from scratch. Delete checkpoint if this is expected.", flush=True)
+            print("[INFO] Starting from scratch due to unreadable checkpoint.", flush=True)
             return 0, 0, None
+        model_state = ckpt.get("model_state_dict")
+        if not isinstance(model_state, dict):
+            print("[WARN] Checkpoint missing model_state_dict. Starting from scratch.", flush=True)
+            return 0, 0, None
+        try:
+            model.load_state_dict(model_state)
+        except Exception as exc:
+            remapped_state = _remap_model_state_for_compat(model, model_state)
+            if remapped_state is None:
+                print(
+                    f"[WARN] Checkpoint exists but is incompatible with current config: {exc}",
+                    flush=True,
+                )
+                print("[INFO] Starting from scratch. Delete checkpoint if this is expected.", flush=True)
+                return 0, 0, None
+            try:
+                model.load_state_dict(remapped_state)
+                print("[INFO] Loaded checkpoint with compatibility key remapping.", flush=True)
+            except Exception as remap_exc:
+                print(
+                    f"[WARN] Checkpoint remap attempt failed: {remap_exc}",
+                    flush=True,
+                )
+                print("[INFO] Starting from scratch. Delete checkpoint if this is expected.", flush=True)
+                return 0, 0, None
+        optimizer_state = ckpt.get("optimizer_state_dict")
+        if optimizer_state is not None:
+            try:
+                optimizer.load_state_dict(optimizer_state)
+            except Exception as exc:
+                print(
+                    f"[WARN] Could not restore optimizer state: {exc}. Continuing with fresh optimizer.",
+                    flush=True,
+                )
         scaler_state = ckpt.get("scaler_state_dict")
         if scaler_state is not None:
             try:
@@ -104,6 +169,15 @@ def load_checkpoint(
             except Exception as exc:
                 print(
                     f"[WARN] Could not restore GradScaler state: {exc}. Continuing with fresh scaler.",
+                    flush=True,
+                )
+        scheduler_state = ckpt.get("scheduler_state_dict")
+        if scheduler is not None and scheduler_state is not None:
+            try:
+                scheduler.load_state_dict(scheduler_state)
+            except Exception as exc:
+                print(
+                    f"[WARN] Could not restore scheduler state: {exc}. Continuing with fresh scheduler.",
                     flush=True,
                 )
         model.head.weight = model.embed.weight

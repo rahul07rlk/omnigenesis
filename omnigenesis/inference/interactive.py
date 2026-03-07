@@ -52,7 +52,20 @@ def _sample_next_token(
         logits.scatter_(1, sorted_indices, sorted_logits)
 
     probs = torch.softmax(logits, dim=-1)
-    return torch.multinomial(probs, num_samples=1)
+    probs = torch.nan_to_num(probs, nan=0.0, posinf=0.0, neginf=0.0)
+    probs_sum = probs.sum(dim=-1, keepdim=True)
+    valid = probs_sum.squeeze(-1) > 0
+    if valid.all():
+        return torch.multinomial(probs, num_samples=1)
+
+    # Fallback for numerically degenerate rows (all-masked / NaN logits): use greedy decode.
+    safe_logits = torch.nan_to_num(logits, nan=-float("inf"), posinf=0.0, neginf=-float("inf"))
+    greedy = torch.argmax(safe_logits, dim=-1, keepdim=True)
+    safe_probs = probs / probs_sum.clamp_min(1e-12)
+    safe_probs = safe_probs.clone()
+    safe_probs[~valid] = 1.0 / safe_probs.size(-1)
+    sampled = torch.multinomial(safe_probs, num_samples=1)
+    return torch.where(valid.view(-1, 1), sampled, greedy)
 
 
 @torch.no_grad()
